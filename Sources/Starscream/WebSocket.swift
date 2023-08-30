@@ -92,10 +92,17 @@ public protocol WebSocketDelegate: AnyObject {
     func didReceive(event: WebSocketEvent, client: WebSocketClient)
 }
 
+import Foundation
+
 open class WebSocket: WebSocketClient, EngineDelegate {
     private let engine: Engine
     public weak var delegate: WebSocketDelegate?
     public var onEvent: ((WebSocketEvent) -> Void)?
+    
+    public var isConnected: Bool = false
+    public var onConnect: (() -> Void)?
+    public var onDisconnect: ((Error?) -> Void)?
+    public var onText: ((String) -> Void)?
     
     public var request: URLRequest
     // Where the callback is executed. It defaults to the main UI thread queue.
@@ -110,6 +117,11 @@ open class WebSocket: WebSocketClient, EngineDelegate {
             return e.respondToPingWithPong
         }
     }
+    
+    // serial write queue to ensure writes happen in order
+    private let writeQueue = DispatchQueue(label: "com.vluxe.starscream.writequeue")
+    private var canSend = false
+    private let mutex = DispatchSemaphore(value: 1)
     
     public init(request: URLRequest, engine: Engine) {
         self.request = request
@@ -140,7 +152,7 @@ open class WebSocket: WebSocketClient, EngineDelegate {
     }
     
     public func write(data: Data, completion: (() -> ())?) {
-         write(data: data, opcode: .binaryFrame, completion: completion)
+        write(data: data, opcode: .binaryFrame, completion: completion)
     }
     
     public func write(string: String, completion: (() -> ())?) {
@@ -167,8 +179,29 @@ open class WebSocket: WebSocketClient, EngineDelegate {
     public func didReceive(event: WebSocketEvent) {
         callbackQueue.async { [weak self] in
             guard let s = self else { return }
+            
             s.delegate?.didReceive(event: event, client: s)
             s.onEvent?(event)
+            
+            switch event {
+            case .connected:
+                self?.isConnected = true
+                self?.onConnect?()
+            case .disconnected:
+                self?.isConnected = false
+                let error = WSError(type: .serverError, message: "Invalid HTTP server", code: 10000)
+                self?.onDisconnect?(error)
+            case .error(let error):
+                self?.isConnected = false
+                self?.onDisconnect?(error)
+            case .cancelled:
+                self?.isConnected = false
+                self?.onDisconnect?(nil)
+            case .text(let string):
+                self?.onText?(string)
+            default:
+                break
+            }
         }
     }
 }
